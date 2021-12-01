@@ -1,0 +1,493 @@
+
+#	Usage:
+#		Dreamcatcher config - View Current config
+
+#		Dreamcatcher setDateTime - Set the target callback time and date (use the same format as show in the config with quotes around date and time)
+
+#		Dreamcatcher setShortSleep - Set the sleep and jitter to use once the target date has been met
+
+#		Dreamcatcher toggleOnInitial - Toggle whether to use the On Initial functionalitity similar to the current sleep script - For new beacons
+# 				The behaviour is as follows:
+#				On Initial event fires - The default sleep is still set as per the profile
+#				The calculated Dreamcatcher value is queued if it is greater than the short sleep value.
+#				On next callback the On Checkin event is called because of the queued Dreamcatcher which queues the short sleep settings.  
+
+#		Dreamcatcher toggleOnCheckin - This method uses the On Checkin to apply to the current beacons 
+
+#				When the On Checkin event fires the Dreamcatcher value is queued the default sleep is still set as per the profile.
+#				Second On Checkin event because of the queued Dreamcatcher which queues the short sleep settings.
+#		!!!!! I use the checkin command to force this to apply but any command works as long as the beacon has something in its tasking queue
+#		!!!!! This should be disabled if you are operating with the script enabled. Even an ls fires the On Checkin event.
+#		!!!!! Known issue the Dreamcatcher (diff) value does not account for one more default sleep setting meaning that the actual callback time
+#		!!!!! is the calculated value plus on round of the default sleep from the profile. Not a huge deal if it is something small like 5 mins
+
+#		Dreamcatcher enable - enables the LongSleep Functionality
+#		!!!!! Verify using Dreamcatcher config prior to executing this command
+
+#		Dreamcatcher disable - Clears the current Beacon Sleep states and sets the script to disabled. Does not clear any of the beacon tasks (i.e. a previously 
+#		queued sleep this should not be an issue as the last queued sleep should be the short one unless it is disabled while the default sleep perior is being 
+#		executed) 
+#
+
+#	Steps: 
+#		1: Load script
+#		2: Set callback datetime Ex: Dreamcatcher-setDateTime "01/01/1000 01:01:00" 
+#		3: Enable which callback types you want: 
+#			Dreamcatcher-toggleOnInitial - to catch new beacons
+#			Dreamcatcher-toggleOnCheckin - to catch existing beacons 
+#		4: Review settings using Dreamcatcher-config
+#		5: If everything is satisfactory enable using Dreamcatcher-enable
+#		7: Dreamcatcher workflow:
+#			Existing Beacons:
+#				a: operator calls one more command (i.e. checkin, ls, pwd) to fire the on_checkin event
+#				b: when the beacon callsback the on_checkin event is fired and the seconds until the callback date is queued (sleep is not changed)
+#				c: the beacon callsback on the current sleep timeframe and the seconds until the callback datetime is set as the sleep (sleep is set to 
+#				   callback) and the short sleep settings are queued (sleep is still the seconds until callback)#
+#				d: The next callback (the long one) gets the queued short sleep settings and Dreamcatcher ign#ores this beacon from now on.#
+#			New Beacons:
+#				a: when the beacon initially callsback the on_initial event is fired and the seconds until the callback date is queued (sleep is not cha#nged)
+#				c: the beacon callsback on the default sleep timeframe and the seconds until the callback datetime is set as the sleep (sleep is set to 
+#				   callback) and the short sleep settings are queued (sleep is still the seconds until callback)#
+#				d: The next callback (the long one) gets the queued short sleep settings and Dreamcatcher ign#ores this beacon from now on.#
+#		8: Upon returning disable Dreamcatcher using Dreamcatcher-disable#
+#			a. Beacon states are reset.
+#		9: Repeat from step 2. 
+#		
+#		Optional:			
+#			Dreamcatcher does store entries for every beacon processed. If you are worried about memory usage you can reload the script to clear them. #
+#
+#		WARNING: For all actions it is recommended that you verify all beacons are operating on the short sleep or an operator defined sleep interval. 
+#				 While Dreamcatcher is enabled the 'clear' command is overridden to prevent clearing out the queued short sleep. However, this may not 
+#				 protect against every edge case.  
+
+
+global('%settings');
+
+# Callback Datetime [Default: $null (Not Set)]
+%settings['cb_dt_str'] = $null;
+
+# Short Sleep [Default: 5 minutes]
+%settings['short_sleep'] = 300;
+
+# Short Jitter [Default: 5%]
+%settings['short_jitter'] = 5;  
+
+# enabled	[Default: 0 (Disabled)]
+%settings['enabled'] = 0;
+
+# On Initial [Default: 0 (Disabled)]
+%settings['on_initial'] = 0;
+
+# On Checkin [Defalut: 0 (Disabled)]
+%settings['on_checkin'] = 0;
+
+# Profile Sleep [Default: 0]
+%settings['profile_sleep'] = 0;
+
+
+#		Beacon Callback States
+#				
+#		%settings[BEACON_ID]
+#		$null 	= Not Initialized
+#		0 		= Long Sleep (Pending) 
+#		1		= Long Sleep (Queued) 
+#		2		= Long Sleep (Set) 		Short Sleep (Queued)
+#		3		= Long Sleep (Set) 		Short Sleep (Set)
+#		4		= Exempt
+#		
+
+%settings['state'] = %(0 => 'Long Sleep (PENDING)', 1 => 'Long Sleep (QUEUED)', 2 => 'Long Sleep (SET) Short Sleep (QUEUED)', 3 => 'Long Sleep (SET) Short Sleep (SET)', 4 => 'EXEMPT');
+
+sub get_diff{
+	try {
+		$a = iff($1 eq $null, parseDate('MM/dd/yyyy HH:mm:ss', %settings['cb_dt_str']), parseDate('MM/dd/yyyy HH:mm:ss',$1));
+		$diff =  (int($a - ticks()) / 1000);
+		return $diff;
+	} 
+	catch $ex
+	{
+		return $null;
+	}
+}
+
+sub set_sleep_offset {
+
+	if (%settings[$1] == 0)
+	{
+
+		# calculate the remaining seconds until desired callback
+		$diff =  get_diff();
+		
+		if ($2 eq "TRUE") 
+		{ 
+			$diff = $diff - %settings['profile_sleep'];  
+		}
+
+		if ($diff eq $null)
+		{
+			blog($1, "Error setting sleep? Use config to verify a valid callback datetime is set.");
+		}
+		else if ($diff > %settings['short_sleep'])
+		{
+			# If remaining seconds is greater than short sleep
+			bsleep($1, $diff, 0);
+			blog($1, "Set long sleep for " . $diff . " seconds");
+			# Queue short sleep on next callback
+			%settings[$1] = 1;
+		}
+		else
+		{
+			# Set short sleep now
+			bsleep($1, %settings['short_sleep'],  %settings['short_jitter']);
+			blog($1, "Set short sleep for " . %settings['short_sleep'] . " seconds, with " . %settings['short_jitter'] . " jitter");
+
+			# Short sleep already set ignore future callbacks 	
+			%settings[$1] = 2;
+
+		}
+	}
+	else if (%settings[$1] == 1)
+	{
+		# Set short sleep now
+		bsleep($1, %settings['short_sleep'],  %settings['short_jitter']);
+		blog($1, "Set short sleep for " . %settings['short_sleep'] . " seconds, with " . %settings['short_jitter'] . " jitter");
+		
+		# Short sleep already set ignore future callbacks 	
+		%settings[$1] = 2;
+
+	}
+}
+
+# ON BEACON CHECKIN HANDLER
+on beacon_checkin{
+	if (%settings['enabled'] == 1){
+		# If script is enabled
+
+		if (%settings[$1] == 1)
+		{
+			# This is called to catch the 
+			set_sleep_offset($1, "FALSE");
+		}
+		else if (%settings[$1] eq $null) 
+		{
+			if(%settings['on_checkin'] == 1)
+			{
+				%settings[$1] = 0;
+				set_sleep_offset($1, "FALSE");
+			}
+		}
+		else if (%settings[$1] = 2)
+		{
+			%settings[$1] = 3;
+		}
+	}
+}
+
+# ON BEACON INITIAL HANDLER
+on beacon_initial{
+	
+	$linked = binfo($1, 'pbid');
+	if($linked eq $null)
+	{
+		#NON SMB BEACONS
+		bnote($1, "EST: " . formatDate('MM/dd/yyyy HH:mm:ss (z)'));
+
+		if (%settings['enabled'] == 1)
+		{
+			# If Dreamcatcher is enabled
+			%settings[$1] = 0;
+			set_sleep_offset($1, "TRUE");
+		}
+	}
+	else
+	{
+		#SMB BEACONS
+		bnote($1, "(SMB) EST: " . formatDate('MM/dd/yyyy HH:mm:ss (z)'));
+	}
+
+}
+
+# ENABLE
+alias("Dreamcatcher-enable", {
+	try 
+	{
+		if(%settings['cb_dt_str'] eq $null)
+		{
+			blog($1, "SET A VALID CALLBACK DATE TIME");
+		}
+		else
+		{
+			$a = parseDate('MM/dd/yyyy HH:mm:ss', %settings['cb_dt_str']);
+
+			if (get_diff() >= %settings['short_sleep'])
+			{
+				%settings['enabled'] = 1;
+				blog($1, "ENABLED: ". iff(%settings['enabled'] == 1, "TRUE", "FALSE"));
+				alias("clear", {
+					blog($1, "Dreamcatcher is enabled clear functionality has been disabled. Use force_clear to do an unsafe clear.");
+				});
+
+				alias("force_clear", {
+					bclear($1);
+				});
+			}
+			else
+			{
+				blog($1, "[!] The target date/time is less than the short sleep or in the past.");
+			}
+			# IF THE ABOVE OUTPUT IS NOT SHOWN ENABLE FAILED
+
+		}
+	}
+	catch $ex
+	{	
+		# FOR SOME REASON THIS IS NOT CALLED THE ERROR IS THROW BUT NOT HANDLED HERE
+		blog($1, "INVALID TARGET DATE");
+	}
+});
+
+# DISABLE
+alias("Dreamcatcher-disable", {
+	try 
+	{
+	    # (WARNING !) THIS CLEARS ALL BEACON STATES YOU WILL HAVE TO MANUALLY MANAGE SLEEP TIMES
+		foreach $beacon (beacons()) {
+			$id = $beacon['id'];
+			%settings[$id] = $null;
+	    }
+		%settings['enabled'] = 0;
+		blog($1, "Dreamcatcher DISABLED, ALL SLEEP STATES HAVE BEEN NULLED");
+		alias_clear("clear");
+		alias_clear("force_clear");
+		# IF THE ABOVE OUTPUT IS NOT SHOWN ENABLE FAILED
+
+	}
+	catch $ex
+	{	
+		# FOR SOME REASON THIS IS NOT CALLED THE ERROR IS THROW BUT NOT HANDLED HERE
+		blog($1, "Dreamcatcher DISABLE FAILED");
+	}
+});
+
+# TOGGLES WHETHER TO USE ON INITIAL - ONLY NEW BEACONS
+alias("Dreamcatcher-toggleOnInitial", {
+	%settings['on_initial'] = iff(%settings['on_initial'] == 0, 1, 0);
+	blog($1, "Dreamcatcher ON INITIAL" . iff(%settings['on_initial'] == 0, "DISABLED", "ENABLED"));
+});
+
+# TOGGLES WHETHER TO USE ON CHECKIN - EXISTING BEACONS AND NEW BEACONS ON SECOND CALLBACK IF ON INITIAL IS NOT USED
+alias("Dreamcatcher-toggleOnCheckin", {
+	%settings['on_checkin'] = iff(%settings['on_checkin'] == 0, 1, 0);
+	blog($1, "Dreamcatcher ON CHECKIN" . iff(%settings['on_checkin'] == 0, 'DISABLED', 'ENABLED'));
+});
+
+
+# Sets the beacon state to 3 so that it will be ignored by Dreamcatcher (Use this on beacons that you are operating on with Dreamcatcher enabled.)
+alias("Dreamcatcher-exempt", {
+	%settings[$1] = 4;
+	blog($1, "Dreamcatcher WILL IGNORE THIS BEACON ID: " . $1);
+});
+
+# Clears the state so Dreamcatcher will begin tracking this beacon
+alias("Dreamcatcher-track", {
+	%settings[$1] = $null;
+	blog($1, "Dreamcatcher WILL NOW TRACK THIS BEACON ID: " . $1);
+});
+
+# Sets the default sleep in the profile
+alias("Dreamcatcher-setProfileSleep", {
+	try 
+	{
+		if($2 ne $null && -isnumber $2)
+		{
+			%settings['profile_sleep'] = int($2);
+			blog($1, "Default profile sleep: " . %settings['profile_sleep']);
+		}
+		else
+		{
+			blog($1, "Failed to set default profile sleep.");
+		}
+
+	}
+	catch $ex
+	{
+		blog($1, "FAILED");
+	}
+});
+
+# SET THE TARGET SLEEP DATE AND TIME IN UTC
+alias("Dreamcatcher-setDateTime", {
+	try 
+	{
+		if($2 eq $null)
+		{
+			blog($1, 'Provide a date/time in format: "MM/dd/yyyy HH:mm:ss" (With quotes)');
+		}
+		else
+		{
+			$diff =  get_diff($2);
+			if($diff eq $null)
+			{
+				blog($1, "NOT SET: Error setting date time. Check the format.");
+			}
+			else if ($diff < %settings['short_sleep'])
+			{
+				blog($1, "NOT SET: Callback is in the past or less than the short sleep time. Short sleep: " . %settings['short_sleep'] . " Seconds till requested callback: " . $diff);
+			}
+			else
+			{	
+				%settings['cb_dt_str'] = $2;
+				$text = "Callback Date/Time set to: " . %settings['cb_dt_str'];
+				$text = $text . " seconds till callback: " . $diff;
+				blog($1, $text);
+			}
+		}
+
+	}
+	catch $ex
+	{
+		blog($1, "FAILED");
+	}
+});
+
+
+# SET THE TARGET SLEEP DATE AND TIME IN UTC
+alias("Dreamcatcher-setShortSleep", {
+	try 
+	{
+		if($2 ne $null && -isnumber $2)
+		{
+			%settings['short_sleep'] = int($2);
+			if($3 ne $null && -isnumber $3)
+			{
+				%settings['short_jitter'] = int($3);
+			}
+			blog($1, "Short sleep: " . %settings['short_sleep'] . " short jitter: " . %settings['short_jitter']);
+		}
+		else
+		{
+			blog($1, "Failed to set short sleep.");
+		}
+
+	}
+	catch $ex
+	{
+		blog($1, "FAILED");
+	}
+});
+
+
+# DISPLAYS CURRENT CONFIG
+alias("Dreamcatcher-config", {
+	$text = "Dreamcatcher CONFIGURATION:\n";
+	$text = $text . "\t CLIENT TIME:         " . formatDate('MM/dd/yyyy HH:mm:ss z') . "\n";
+	$text = $text . "\t ENABLED:             " . iff(%settings['enabled'] == 1, 'ENABLED', 'DISABLED') . "\n";
+	if (%settings['cb_dt_str'] eq $null)
+	{
+		$text = $text . "\t CALLBACK DATE TIME:  NOT SET\n";
+		$text = $text . "\t SECONDS TO CALLBACK: NOT SET\n";
+	}
+	else
+	{
+		$text = $text . "\t CALLBACK DATE TIME:  " . %settings['cb_dt_str'] . "\n";
+		$diff = get_diff();
+		$text = $text . "\t SECONDS TO CALLBACK: ". $diff . "\n";
+	}
+	$text = $text . "\t SHORT SLEEP:         " . %settings['short_sleep'] . "\n";
+	$text = $text . "\t SHORT JITTER:        " . %settings['short_jitter'] . "\n";
+	$text = $text . "\t PROFILE SLEEP:       " . %settings['profile_sleep'] . "\n";
+	$text = $text . "\t ON INITIAL:          " . iff(%settings['on_initial'] == 1, 'ENABLED', 'DISABLED') . "\n";
+	$text = $text . "\t ON CHECKIN:          " . iff(%settings['on_checkin'] == 1, 'ENABLED', 'DISABLED') . "\n";
+	$text = $text . "\t THIS BEACON STATE:   " . iff(%settings[$1] eq $null, 'NOT INITIALIZED', %settings['state'][%settings[$1]]) . "\n";
+	blog($1, $text);
+});
+
+alias("Dreamcatcher", { help("Dreamcatcher"); });
+
+
+beacon_command_register(
+	"Dreamcatcher",
+	"Dreamcatcher - Callback management tool.",
+	"Synopsis:\n\tDreamcatcher allows operators to pick a date and time in the future to target for all beacon callbacks.\n\t" . 
+    "This helps maintain opsec by sleeping existing and new beacon callbacks down until the desired date and\n\t" . 
+    "time then sleeping up callbacks using a preset interval.\n\t".
+    "NOTE: Clearing the beacon queue after enabling Dreamcatcher will break functionality, the short sleep\n\t" . 
+    "settings are queued after the Dreamcatcher has been retrieved by the beacon. Clearing the queue will remove\n\t".
+    "the short sleep and the Dreamcatcher will not be overwritten.\n\n". 
+    "\tCOMMANDS:\n".
+    "\t\tDreamcatcher-config          - Display the current configuation settings\n".
+    "\t\tDreamcatcher-toggleOnInitial - Enables callback handling for the 'beacon_initial' callbacks (i.e. new beacons)\n".
+    "\t\tDreamcatcher-toggleOnCheckin - Enables callback handling for the 'beacon_checkin' event (i.e. existing beacons)\n".
+    "\t\t                               !!! DO NOT ENABLE WHILE OPERATING !!!\n".
+    "\t\t                               Requires that a beacon command is ran to fire the event (i.e. checkin)\n".
+    "\t\tDreamcatcher-setDateTime     - Set the callback target date and time (ALL TIMES IN " . formatDate("z") . ")\n".
+    "\t\tDreamcatcher-setShortSleep   - Set the sleep values to use once the callback date and time has been exceeded\n".
+    "\t\tDreamcatcher-enable          - Enables callback handling\n".
+    "\t\tDreamcatcher-disable         - Disables callback handling and clears beacon callback state\n".
+    "\t\tDreamcatcher-exempt          - Call from a beacon console to make Dreamcatcher ignore that beacon\n".
+    "\t\tDreamcatcher-track           - Call from a beacon console to make Dreamcatcher track that beacon\n".
+    "\t\tDreamcatcher-setProfileSleep - Sets a default sleep value that is in the listener profile to more accurately  ".
+    "\t\t                               calculate time only affects new beacons. "
+);
+
+beacon_command_register(
+	"Dreamcatcher-setProfileSleep",
+	"Set a sleep value that corresponds to the default value in the C2Profile (OPTIONAL)",
+	"Synopsis: Sets a default sleep value that corresponds to the C2Profile. This is used to more accurately calculate \n\tthe long sleep time for new beacons only. It is subtracted from the time difference to offset for the first callback \n\tthat occurs using the profile sleep value."
+);
+
+beacon_command_register(
+	"Dreamcatcher-exempt",
+	"Sets the current beacon to be ignored by Dreamcatcher",
+	"Synopsis: While in the beacon interactive console run this command to make Dreamcatcher ignore this specific beacon."
+);
+
+beacon_command_register(
+	"Dreamcatcher-track",
+	"Sets the current beacon to be included by Dreamcatcher",
+	"Synopsis: While in the beacon interactive console run this command to make Dreamcatcher track the beacon."
+);
+
+beacon_command_register(
+	"Dreamcatcher-config",
+	"Displays the current Dreamcatcher Configuration.",
+	"Synopsis: Displays all of the current configuration settings for the Dreamcatcher Program. Useful to verify setting prior to enabling."
+);
+
+beacon_command_register(
+	"Dreamcatcher-toggleOnInitial",
+	"Enables or disables the Dreamcatcher functionality for the 'beacon_initial' event.",
+	"Synopsis: Use this to enable or disable setting Dreamcatcher to sleep down new beacons. Does not apply to SMB beacons."
+);
+
+beacon_command_register(
+	"Dreamcatcher-toggleOnCheckin",
+	"Enables or disables the Dreamcatcher functionality for the 'beacon_checkin' event.",
+	"Synopsis: Use this to enable or disable setting Dreamcatcher to sleep down existing beacons. Does not apply to SMB beacons. \nNOTE: Disable if you are operating while Dreamcatcher is enabled. The 'beacon_checkin' event is fired whenever something is in the beacon\'s tasking queue this means that even an 'ls' will fire the event."
+);
+
+beacon_command_register(
+	"Dreamcatcher-setDateTime",
+	"Sets the next callback date and time for Dreamcatcher (TIME IN " . formatDate("z") . ")",
+	"Synopsis: Sets the next callback date and time. The number of seconds until callback is displayed in the 'config'. \nUsage: Dreamcatcher setDateTime \"01/01/2021 07:00:00\" \nAll times are aligned with the Aggressor Client timezone (" . formatDate("z") . ") and include the quotes as part of the command."
+);
+
+beacon_command_register(
+	"Dreamcatcher-setShortSleep",
+	"Sets the sleep values to use once the callback date has been exceeded.",
+	"Synopsis: Sets the sleep and jitter arguements that Dreamcatcher will use once the callback time has been exceeded. \nUsage: Dreamcatcher setShortSleep 900 15 (this would set a sleep of 900 seconds and a 15% jitter)"
+);
+
+beacon_command_register(
+	"Dreamcatcher-enable",
+	"Enables Dreamcatcher",
+	"Synopsis: Enables Dreamcatcher to begin catching callbacks and setting according to the current configuration."
+);
+
+beacon_command_register(
+	"Dreamcatcher-disable",
+	"Disables Dreamcatcher and clears the current beacon state",
+	"Synopsis: Disables Dreamcatcher and clears the current beacon state. Use to begin operating again. All beacon states are cleared so that if a new date and time is set Dreamcatcher can be reenabled without unloading the script."
+);
+
+
