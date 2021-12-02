@@ -1,3 +1,8 @@
+Change Log:
+#   12/02/2021  - Added a state clearing loop to the setDateTime function for all non-exempt beacons.
+#                 This is an attempt to correct an issue where the final tracked state (3) never gets reset when Dreamcatcher is never disabled.
+#   12/02/2021  - Changed the scope of settings to 'this' in an effort to fix data persistence when the script is reloaded
+
 
 #	Usage:
 #		Dreamcatcher config - View Current config
@@ -61,7 +66,7 @@
 #				 protect against every edge case.  
 
 
-global('%settings');
+this('%settings');
 
 # Callback Datetime [Default: $null (Not Set)]
 %settings['cb_dt_str'] = $null;
@@ -337,6 +342,16 @@ alias("Dreamcatcher-setDateTime", {
 			else
 			{	
 				%settings['cb_dt_str'] = $2;
+
+				foreach $key (keys(%settings))
+				{
+					if($key in beacon_ids())
+					{
+						# Resets all non-exempt beacons
+						%settings[$key] = iff(%settings[$key] == 4, 4, $null);
+					}
+				}
+				
 				$text = "Callback Date/Time set to: " . %settings['cb_dt_str'];
 				$text = $text . " seconds till callback: " . $diff;
 				blog($1, $text);
